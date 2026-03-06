@@ -38,7 +38,7 @@ static bool adc_setup_done;
 
 /* Async wait objects */
 static struct k_poll_signal adc_sig;
-static struct k_poll_event  adc_evt = K_POLL_EVENT_INITIALIZER(
+static struct k_poll_event adc_evt = K_POLL_EVENT_INITIALIZER(
 	K_POLL_TYPE_SIGNAL,
 	K_POLL_MODE_NOTIFY_ONLY,
 	&adc_sig
@@ -81,14 +81,24 @@ static int adc_sample_async(int16_t *out_raw)
 
 	/* Start async conversion */
 	k_poll_signal_reset(&adc_sig);
+	adc_evt.state = K_POLL_STATE_NOT_READY;
 
-	/* TODO: students call adc_read_async(adc_channel.dev, &seq, &adc_sig); */
-	/* err = adc_read_async(...); */
-	/* if (err < 0) return err; */
+	err = adc_read_async(adc_channel.dev, &seq, &adc_sig);
+	if (err < 0) {
+		printk("adc_read_async failed (err=%d)\n", err);
+		return err;
+	}
 
-	/* TODO: students wait for completion using k_poll(&adc_evt, 1, timeout) */
-	/* err = k_poll(&adc_evt, 1, K_MSEC(1000)); */
-	/* if (err < 0) return err; */
+	err = k_poll(&adc_evt, 1, K_MSEC(1000));
+	if (err < 0) {
+		printk("k_poll failed (err=%d)\n", err);
+		return err;
+	}
+
+	if (adc_evt.state != K_POLL_STATE_SIGNALED) {
+		printk("ADC async event not signaled\n");
+		return -EIO;
+	}
 
 	/* After completion, adc_buf has the sample */
 	*out_raw = adc_buf;
@@ -122,20 +132,21 @@ int main(void)
 		err = adc_sample_async(&raw);
 		if (err == 0) {
 			/* 2) Convert raw -> mV (reuse Task 1 knowledge) */
-			int32_t mv = 0;      /* TODO */
-			float temp_c = 0.0f; /* TODO */
+			int32_t mv = raw;
+			err = adc_raw_to_millivolts_dt(&adc_channel, &mv);
+			if (err < 0) {
+				printk("raw->mV conversion failed (err=%d)\n", err);
+				k_sleep(K_MSEC(SAMPLE_PERIOD_MS));
+				continue;
+			}
 
-			/* TODO:
-			 *   mv = raw;
-			 *   adc_raw_to_millivolts_dt(&adc_channel, &mv);
-			 *   temp_c = (mv/10) - 273.15;  (LM335)
-			 */
+			float temp_c = ((float)mv / 10.0f) - 273.15f;
 
 			/* 3) Optional threshold LED */
 			bool led_on = (temp_c > TEMP_THRESHOLD_C);
 			(void)gpio_pin_set_dt(&led0, led_on ? 1 : 0);
 
-			printk("raw=%d, mv=%d (TODO), temp=%.2f (TODO), LED=%s\n",
+			printk("raw=%d, mv=%d, temp=%.2f C, LED=%s\n",
 			       raw, mv, (double)temp_c, led_on ? "ON" : "OFF");
 		} else {
 			printk("adc_sample_async failed (err=%d)\n", err);
