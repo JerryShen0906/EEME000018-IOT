@@ -1,7 +1,5 @@
 /*
- * Copyright (c) 2016 Intel Corporation
- *
- * SPDX-License-Identifier: Apache-2.0
+ * Multi-threaded LED chase using semaphores in Zephyr RTOS
  */
 
 #include <zephyr/kernel.h>
@@ -10,17 +8,11 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/sys/printk.h>
 
-/* Button alias: sw0 */
-#define SW0_NODE DT_ALIAS(sw0)
-
-/* LED aliases */
+/* LED aliases from device tree */
 #define LED0_NODE DT_ALIAS(led0)
 #define LED1_NODE DT_ALIAS(led1)
 #define LED2_NODE DT_ALIAS(led2)
 #define LED3_NODE DT_ALIAS(led3)
-
-/* Get button specification */
-static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(SW0_NODE, gpios);
 
 /* Get LED specifications */
 static const struct gpio_dt_spec leds[] = {
@@ -32,54 +24,84 @@ static const struct gpio_dt_spec leds[] = {
 
 #define NUM_LEDS ARRAY_SIZE(leds)
 
-/* Button callback structure */
-static struct gpio_callback button_cb_data;
+/* Stack size and thread priority */
+#define STACK_SIZE 512
+#define THREAD_PRIORITY 5
 
-/* Current active LED index */
-static int current_led = 0;
+/* Delay between LED changes */
+#define LED_DELAY_MS 1
 
-/* Update LEDs so that only one is ON */
+/* Semaphores: one per LED thread */
+K_SEM_DEFINE(sem_led0, 1, 1);  /* Start with LED0 enabled */
+K_SEM_DEFINE(sem_led1, 0, 1);
+K_SEM_DEFINE(sem_led2, 0, 1);
+K_SEM_DEFINE(sem_led3, 0, 1);
+
+static struct k_sem *led_sems[NUM_LEDS] = {
+    &sem_led0,
+    &sem_led1,
+    &sem_led2,
+    &sem_led3
+};
+
+/* Thread stacks */
+K_THREAD_STACK_DEFINE(stack0, STACK_SIZE);
+K_THREAD_STACK_DEFINE(stack1, STACK_SIZE);
+K_THREAD_STACK_DEFINE(stack2, STACK_SIZE);
+K_THREAD_STACK_DEFINE(stack3, STACK_SIZE);
+
+/* Thread control blocks */
+static struct k_thread thread_data0;
+static struct k_thread thread_data1;
+static struct k_thread thread_data2;
+static struct k_thread thread_data3;
+
+/* Turn ON only one LED */
 static void update_leds(int active_led)
 {
     for (int i = 0; i < NUM_LEDS; i++) {
         gpio_pin_set_dt(&leds[i], (i == active_led) ? 1 : 0);
     }
-
-    printk("Current LED: LED%d\n", active_led);
+    printk("LED%d ON\n", active_led);
 }
 
-/* Button interrupt callback */
-void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+/* Generic LED thread function */
+void led_thread(void *p1, void *p2, void *p3)
 {
-    ARG_UNUSED(dev);
-    ARG_UNUSED(cb);
-    ARG_UNUSED(pins);
+    ARG_UNUSED(p2);
+    ARG_UNUSED(p3);
 
-    /* Move to next LED in circular sequence */
-    current_led = (current_led + 1) % NUM_LEDS;
-    update_leds(current_led);
+    int led_id = (int)(intptr_t)p1;
+    int next_led = (led_id + 1) % NUM_LEDS;
+
+    while (1) {
+        /* Wait until this LED gets the baton */
+        k_sem_take(led_sems[led_id], K_FOREVER);
+
+        /* Light this LED only */
+        update_leds(led_id);
+
+        /* Keep it on for a while */
+        k_sleep(K_MSEC(LED_DELAY_MS));
+
+        /* Pass baton to next LED thread */
+        k_sem_give(led_sems[next_led]);
+    }
 }
 
 int main(void)
 {
     int ret;
 
-    /* Check button device */
-    if (!device_is_ready(button.port)) {
-        printk("Error: button device is not ready\n");
-        return -1;
-    }
+    printk("Starting semaphore-based LED chase...\n");
 
-    /* Check all LED devices */
+    /* Check LED devices and configure them */
     for (int i = 0; i < NUM_LEDS; i++) {
         if (!device_is_ready(leds[i].port)) {
-            printk("Error: LED%d device is not ready\n", i);
+            printk("Error: LED%d device not ready\n", i);
             return -1;
         }
-    }
 
-    /* Configure LEDs as output and initially OFF */
-    for (int i = 0; i < NUM_LEDS; i++) {
         ret = gpio_pin_configure_dt(&leds[i], GPIO_OUTPUT_INACTIVE);
         if (ret < 0) {
             printk("Error: failed to configure LED%d\n", i);
@@ -87,30 +109,24 @@ int main(void)
         }
     }
 
-    /* Turn ON LED0 initially */
-    update_leds(current_led);
+    /* Create 4 LED threads */
+    k_thread_create(&thread_data0, stack0, STACK_SIZE,
+                    led_thread, (void *)(intptr_t)0, NULL, NULL,
+                    THREAD_PRIORITY, 0, K_NO_WAIT);
 
-    /* Configure button as input */
-    ret = gpio_pin_configure_dt(&button, GPIO_INPUT);
-    if (ret < 0) {
-        printk("Error: failed to configure button\n");
-        return -1;
-    }
+    k_thread_create(&thread_data1, stack1, STACK_SIZE,
+                    led_thread, (void *)(intptr_t)1, NULL, NULL,
+                    THREAD_PRIORITY, 0, K_NO_WAIT);
 
-    /* Configure button interrupt */
-    ret = gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_TO_ACTIVE);
-    if (ret < 0) {
-        printk("Error: failed to configure button interrupt\n");
-        return -1;
-    }
+    k_thread_create(&thread_data2, stack2, STACK_SIZE,
+                    led_thread, (void *)(intptr_t)2, NULL, NULL,
+                    THREAD_PRIORITY, 0, K_NO_WAIT);
 
-    /* Initialize callback */
-    gpio_init_callback(&button_cb_data, button_pressed, BIT(button.pin));
-    gpio_add_callback(button.port, &button_cb_data);
+    k_thread_create(&thread_data3, stack3, STACK_SIZE,
+                    led_thread, (void *)(intptr_t)3, NULL, NULL,
+                    THREAD_PRIORITY, 0, K_NO_WAIT);
 
-    printk("System ready. Press SW0 to cycle LEDs.\n");
-
-    /* Main thread does nothing, wait for interrupts */
+    /* Main thread can sleep forever */
     while (1) {
         k_sleep(K_FOREVER);
     }
