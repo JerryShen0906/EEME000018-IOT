@@ -74,15 +74,23 @@ static int read_and_print_temperature(float *out_temp_c)
 
 	const int16_t raw = adc_buf;
 
-	/* TODO (students may reuse Task 1 conversion here if not already completed) */
-	int32_t mv = 0;      /* TODO */
-	float temp_c = 0.0f; /* TODO */
+	/* raw -> mV */
+	int32_t mv = raw;
+	err = adc_raw_to_millivolts_dt(&adc_channel, &mv);
+	if (err < 0) {
+		printk("ADC raw to mV conversion failed (err=%d)\n", err);
+		return err;
+	}
 
-	/* TODO optional (Task 2): LED logic */
-	/* bool led_on = (temp_c > TEMP_THRESHOLD_C); */
-	/* gpio_pin_set_dt(&led0, led_on ? 1 : 0); */
+	/* mV -> temperature (LM335: 10 mV/K) */
+	float temp_c = ((float)mv / 10.0f) - 273.15f;
 
-	printk("raw=%d, mv=%d (TODO), temp=%.2f (TODO)\n", raw, mv, (double)temp_c);
+	/* Optional LED logic */
+	bool led_on = (temp_c > TEMP_THRESHOLD_C);
+	gpio_pin_set_dt(&led0, led_on ? 1 : 0);
+
+	printk("raw=%d, mv=%d, temp=%.2f C, LED=%s\n",
+	       raw, mv, (double)temp_c, led_on ? "ON" : "OFF");
 
 	if (out_temp_c) {
 		*out_temp_c = temp_c;
@@ -99,14 +107,14 @@ static struct k_work  sample_work;
 static void sample_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	/* TODO: call read_and_print_temperature(NULL); */
+	read_and_print_temperature(NULL);
 }
 
 /* Runs in timer context (do NOT touch ADC here) */
 static void sample_timer_handler(struct k_timer *timer)
 {
 	ARG_UNUSED(timer);
-	/* TODO: submit the work item (k_work_submit) */
+	k_work_submit(&sample_work);
 }
 #endif
 
@@ -128,7 +136,10 @@ int main(void)
 	}
 
 #if USE_TIMER_EVENT_DRIVEN
-	/* TODO: initialise work + timer, start timer */
+	k_work_init(&sample_work, sample_work_handler);
+	k_timer_init(&sample_timer, sample_timer_handler, NULL);
+	k_timer_start(&sample_timer, K_NO_WAIT, K_MSEC(SAMPLE_PERIOD_MS));
+
 	printk("Mode = TIMER (event-driven)\n");
 
 	while (1) {
@@ -138,7 +149,7 @@ int main(void)
 	printk("Mode = POLLING\n");
 
 	while (1) {
-		/* TODO: call read_and_print_temperature(NULL); */
+		read_and_print_temperature(NULL);
 		k_sleep(K_MSEC(SAMPLE_PERIOD_MS));
 	}
 #endif
